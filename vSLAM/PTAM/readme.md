@@ -1,4 +1,12 @@
-# Parallel Tracking And Mapping (PTAM) 特征点法 
+# Parallel Tracking And Mapping (PTAM) 特征点法 fast角点+灰度块匹配 2d-2d单应变换
+
+[本文github](https://github.com/Ewenwan/MVision/tree/master/vSLAM/PTAM)
+
+[项目主页](http://www.robots.ox.ac.uk/~gk/PTAM/)
+
+[github 代码 makefile工程改成了cmake工程](https://github.com/Ewenwan/PTAM4AR)
+
+
 ![](http://image.mamicode.com/info/201802/20180211193608683439.png)
       
       PTAM[1]是视觉SLAM领域里程碑式的项目。
@@ -75,10 +83,6 @@
             3) 后端优化（Bundle Adjustment）
             4) 建图（极线搜索加点）
             5) 没有回环检测
-
-[项目主页](http://www.robots.ox.ac.uk/~gk/PTAM/)
-
-[github 代码 makefile工程改成了cmake工程](https://github.com/Ewenwan/PTAM4AR)
 
 ## 主要原理是: 
       从摄影图像上捕捉特征点，
@@ -227,4 +231,163 @@
  
 [PTAM之姿态估计 ](https://blog.csdn.net/ilotuo/article/details/51830928)
    
+   
 ## 9. 代码分析
+[依赖库安装](https://github.com/Ewenwan/MVision/blob/master/vSLAM/PTAM/3rdParty_install.sh)
+
+      下载代码并安装： 
+      git clone https://github.com/Ewenwan/PTAM4AR.git
+      cd PTAM4AR
+      mkdir build
+      cd build
+      cmake ..
+      make -j
+### 主要依赖库
+#### libCVD (computer vision library) - 计算机视觉库，主要用于计算机视觉和视频、图片处理
+      fast_corner fast角点检测
+      video yuv420 yuv411编解码  视频读取 
+[代码](https://github.com/Ewenwan/libcvd)
+
+#### GVars3 (configuration system library) - 系统配置库，属于libCVD的子项目，功能是读取配置文件，获取命令行数
+      GUI  简单 用户界面程序
+      GV3::get() 获取配置参数
+[代码](https://github.com/Ewenwan/gvars)
+
+
+#### TooN (Tom’s Object-oriented numerics library) - 主要用于大量小矩阵的运算，尤其是矩阵分解和优化
+
+### 代码结构分析
+[代码分析参考](https://blog.csdn.net/aquathinker/article/details/7768519)
+
+      入口函数 src/main.cc
+            //GVars3::GUI
+            GUI.LoadFile("../config/settings.cfg");// 载入相机参数等配置文件
+            System s;// 创建系统对象 自动执行 System::System()函数
+            s.Run(); // 运行
+            
+src/System.cc
+#### A. 系统对象构造函数 System::System()
+      0. 对象继承于
+         mpVideoSource(new VideoSourceV4L())      // 视频处理对象 V4L库视频对象 src/VideoSource.cc
+         mGLWindow(mpVideoSource->Size(), "PTAM") // 菜单 GLWindow2 mGLWindow      src/GLWindow2.cc  
+
+      1. 注册一系列命令、添加相对应的功能按钮。
+          //GVars3::GUI
+          GUI.RegisterCommand("exit", GUICommandCallBack, this);// 退出
+          GUI.RegisterCommand("quit", GUICommandCallBack, this);// 停止
+
+      2. 检查相机参数是否已经传入，否则退出，去进行相机标定
+          使用GVars3库函数
+          vTest = GV3::get<Vector<NUMTRACKERCAMPARAMETERS> >("Camera.Parameters", ATANCamera::mvDefaultParams, HIDDEN);
+
+      3. 创建摄像机ATANCamera对象 
+          // ATANCamera.cc 相机内参数、畸变参数、图像大小、归一化平面投影
+          mpCamera = new ATANCamera("Camera");
+
+      4. 创建地图Map 地图创建管理器MapMaker 跟踪器Tracker 增强现实AR驱动ARDriver 地图显示MapViewer 
+            mpMap = new Map;                              // src/Map.cc      地图
+            mpMapMaker = new MapMaker(*mpMap, *mpCamera); // src/MapMaker.cc 地图管理器
+            mpTracker = new Tracker(mpVideoSource->Size(), *mpCamera, *mpMap, *mpMapMaker);// src/Tracker.cc   跟踪器
+            mpARDriver = new ARDriver(*mpCamera, mpVideoSource->Size(), mGLWindow);        // src/ARDriver.cc  虚拟物体
+            mpMapViewer = new MapViewer(*mpMap, mGLWindow);                                // src/MapViewer.cc 地图显示
+      5. 初始化GUI游戏菜单及相应功能按钮。
+            GUI.ParseLine("GLWindow.AddMenu Menu Menu");
+            GUI.ParseLine("Menu.ShowMenu Root");
+            GUI.ParseLine("Menu.AddMenuButton Root Reset Reset Root");
+            GUI.ParseLine("Menu.AddMenuButton Root Spacebar PokeTracker Root");
+            GUI.ParseLine("DrawAR=0");
+            GUI.ParseLine("DrawMap=0");
+            GUI.ParseLine("Menu.AddMenuToggle Root \"View Map\" DrawMap Root");
+            GUI.ParseLine("Menu.AddMenuToggle Root \"Draw AR\" DrawAR Root");
+      6. 初始化标志 
+            mbDone = false;// 初始化时mbDone = false;  
+
+####   B. 系统运行函数 void System::Run()
+      1. 创建图像处理对象
+            CVD::Image<CVD::Rgb<CVD::byte> > imFrameRGB(mpVideoSource->Size());// 彩色图像用于最终的显示
+            CVD::Image<CVD::byte> imFrameBW(mpVideoSource->Size());//黑白(灰度)图像用于处理追踪相关等功能
+      2. 采集上述两种图像
+            mpVideoSource->GetAndFillFrameBWandRGB(imFrameBW, imFrameRGB);
+      3. 系统跟踪和建图， 更新系统帧
+            UpdateFrame(imFrameBW, imFrameRGB);
+
+####  C. 系统跟踪和建图， 更新系统帧 System::UpdateFrame()
+      1. 系统初始化，第一帧的处理，单应变换求解3D点云，生成初始地图
+      2. 设置可是化窗口相关属性
+      3. 读取 显示配置参数
+      4. 显示表示更新，DrawMap及DrawAR状态变量的判断
+      5. 开始追踪黑白图像(相机位姿跟踪)
+             多层级金字塔图像(多金字塔尺度) FAST角点检测匹配跟踪
+             每一个层级的阈值有所不同。最后生成按列角点查询表，便于以后近邻角点的查询任务.
+            mpTracker->TrackFrame(imBW, !bDrawAR && !bDrawMap);// Tracker::TrackFrame() src/Tracker.cc
+      6. 可视化显示点云和 虚拟物体
+      7.可视化文字菜单显示
+      
+跟踪线程主要函数文件 src/Tracker.cc
+
+#### Tracker::TrackFrame() 跟踪每一帧图像
+
+      步骤1： 预处理，为当前关键帧生成4级金字塔图像(多尺度金字塔)，进行FAST角点检测，生成角点查找表
+              mCurrentKF.MakeKeyFrame_Lite(imFrame);// src/KeyFrame.cc, KeyFrame::MakeKeyFrame_Lite()
+              1. 生成金字塔图像，上一层下采样得到下一层图像
+                  lev.im.resize(aLevels[i - 1].im.size() / 2);// 尺寸减半
+                  halfSample(aLevels[i - 1].im, lev.im);// 上一层下采样，得到下一层图像
+
+              2. FAST角点 检测，对每一层进行 FAST角点 检测
+                  if (i == 0)// 第0层 图像
+                        fast_corner_detect_10(lev.im, lev.vCorners, 10);
+                  if (i == 1)// 第1层 图像
+                        fast_corner_detect_10(lev.im, lev.vCorners, 15);
+                  if (i == 2)// 第2层 图像
+                        fast_corner_detect_10(lev.im, lev.vCorners, 15);
+                  if (i == 3)// 第4层 图像
+                        fast_corner_detect_10(lev.im, lev.vCorners, 10);
+
+               3. 建立角点查找表，加快查找，对每一行的角点创建查找表LUT 加速查找邻居角点
+      步骤2：更新小图，为估计旋转矩阵做准备
+      步骤3：显示图像(第0层)和FAST角点
+                  1. 运动模型跟踪上一帧(求解初始位置，上一帧速度乘上上一帧位姿)
+                        Tracker::PredictPoseWithMotionModel();
+
+                  2. 跟踪地图 最重要的部分
+                        Tracker::TrackMap();
+                            a. 地图点根据帧初始位姿和相机参数投影到帧的二维图像平面上，
+                               跳过不在相机平面上的点
+                            b. patch 匹配查找匹配点对
+                            c. 3d-2d p6p求解 
+
+                  3. 更新运动模型(前后两帧变换矩阵)
+                        Tracker::UpdateMotionModel();
+
+                  4. 确保跟踪质量
+                        Tracker::AssessTrackingQuality();
+                  5. 显示更新系统跟踪状态信息(跟踪质量好坏 每一层fast角点熟练 地图点和关键帧数量)
+                        manMeasFound[i]；
+                        manMeasAttempted[i];
+                        mMap.vpPoints.size()；
+                        mMap.vpKeyFrames.size()；
+                  6. 关键帧判断+创建关键帧   
+                        mMapMaker.IsNeedNewKeyFrame(mCurrentKF);//是否需要创建关键帧 MapMaker::IsNeedNewKeyFrame()
+                        mMapMaker.AddKeyFrame(mCurrentKF);// 创建关键帧
+                  7. 跟踪丢失的处理--类似重定位处理
+                        Tracker::AttemptRecovery();// 重定位
+                        Tracker::TrackMap();       // 跟踪地图，更新位姿
+                  8. 起初地图质量不好(点比较少)，初始地图跟踪
+                        Tracker::TrackForInitialMap();
+                        
+                        
+建图线程主要函数文件 src/MapMaker.cc
+#### MapMaker::run()
+      步骤1. 局部地图优化
+             MapMaker::BundleAdjustRecent();
+      步骤2. 地图点投影到关键帧，无匹配到的角点，三角化，创建新的地图点
+            MapMaker::ReFindNewlyMade();
+                MapMaker::Triangulate();
+      步骤3. 全局地图优化
+            MapMaker::BundleAdjustAll();
+      步骤4. 查找外点
+            MapMaker::ReFindFromFailureQueue();
+      步骤5. 处理外点
+            MapMaker::HandleBadPoints();
+      步骤6. 添加关键帧到地图
+            MapMaker::AddKeyFrameFromTopOfQueue();

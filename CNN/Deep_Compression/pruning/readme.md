@@ -1,6 +1,9 @@
 # pruning 剪枝
+[ Caffe-Python-Tutorial/prune.py 剪枝 网络参数统计可视化](https://github.com/Ewenwan/Caffe-Python-Tutorial/blob/master/prune.py)
 
-[剪枝代码参考](https://github.com/Ewenwan/cut_weight_cnn)
+[深度神经网络剪枝 ](https://github.com/Ewenwan/channel-pruning)
+
+[TensorFlow 剪枝代码 参考](https://github.com/Ewenwan/cut_weight_cnn)
 
 [博客](https://blog.csdn.net/jason19966/article/details/78922695)
 

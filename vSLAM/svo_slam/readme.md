@@ -1,13 +1,16 @@
-# svo： semi-direct visual odometry 半直接视觉里程计
+# svo： semi-direct visual odometry 半直接视觉里程计 FAST角点+最小化广度误差直接法的半直接法
 
 ![](https://images2015.cnblogs.com/blog/990334/201706/990334-20170630091523868-2008067667.png)
-
 
 [svo代码注释](https://github.com/Ewenwan/rpg_svo)
 
 [SVO代码分析 较细致](https://www.cnblogs.com/hxzkh/p/8607714.html)
 
+[学习rpg_svo 根据代码和论文进行一步步的分析](https://github.com/yueying/OpenMVO)
+
 [svo： semi-direct visual odometry 论文解析](https://blog.csdn.net/heyijia0327/article/details/51083398)
+
+[鲁棒 边缘特征SVO](https://github.com/Ewenwan/svo_edgelet)
 
 [SVO原理解析](http://www.cnblogs.com/luyb/p/5773691.html)
 
@@ -385,6 +388,23 @@
 
 
 # 和常规的单目一样，SVO算法分成两部分: 位姿估计，深度估计
+    数据关联中的点所在空间有三种:
+    1) 2D−2D: 当前帧的点和过往帧的点都是在图像空间中 . 在单目相机的初始化过程中经常出现这种数据关联
+    2) 3D−2D: 过往帧的点在 3D 空间中 , 当前帧的点在图像空间中 , 这样问题转化为一个 PnP 问题。
+    3) 3D−3D: 当前帧和过往帧的点都在 3D 空间中 , 这种情形一般在深度相机 VO 系统的位姿估计或经过三角测量的点进行 BA 时出现。
+
+    1. 在 VO 系统初始化时 , 地图未建立 , 系统无法确定当前状态 , 采用 2D−2D 数据关联 , 
+       求解基础矩阵或者单应矩阵后，对基础矩阵或单应矩阵分解求解相机的相对位姿 , 三角化求解路标点的三维坐标。 
+    2. 若地图中 3D 点可用 , 优先使用3D 点进行位姿估计 . 
+       此时 , 将3D路标点投影到当前帧图像 , 在局部范围内搜索完成图像点的匹配。
+       这种 3D−2D 的数据关联经常用于 VO 系统正常状态下的定位 . 
+    3. 3D−3D 数据关联常用于估计和修正累积误差和漂移 . 3D 路标点会出现在多帧图像中 , 
+       通过这些 3D 点之间的数据关联可以修正相机的运动轨迹以及 3D 点的三维位置.
+
+    SVO，正常状态下系统处理当前的每一帧时三种数据关联先后被使用 ,
+    2D−2D 数据关联实现图像空间的特征点匹配 , 通过 3D−2D 数据关联计算相机的位姿 ,
+    并经过 3D−3D 数据关联后,利用 BA 进行位姿的优化 .
+
 ## 1. 位姿估计 motion estimation
         svo 方法中motion estimation的步骤可以简单概括如下:
 

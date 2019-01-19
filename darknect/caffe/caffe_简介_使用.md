@@ -244,6 +244,131 @@
        bottom: "conv1"
        top: "conv1"
       }
+```c++
+template <typename Dtype>
+__global__ void ReLUForward(const int n, const Dtype* in, Dtype* out,
+    Dtype negative_slope) {
+  CUDA_KERNEL_LOOP(index, n) {
+    out[index] = in[index] > 0 ? in[index] : in[index] * negative_slope;
+	// (a*x,x) 正常无上截断
+  }
+}
+//////////////////////////////////////////////
+////================================
+// 前传
+template <typename Dtype>
+__global__ void ReLUXForward(const int n, const Dtype* in, Dtype* out,
+    Dtype negative_slope, Dtype relux_cur_max) {
+  CUDA_KERNEL_LOOP(index, n) {
+    out[index] = in[index] > 0 ? in[index] : in[index] * negative_slope;
+    out[index] = out[index] < relux_cur_max ? out[index] : relux_cur_max;
+	// (a*x, x|cur_max) 上截断=========
+  }
+}
+
+template <typename Dtype>
+__global__ void ReLUXRForward(const int n, const Dtype* in, Dtype* out,
+    Dtype negative_slope, Dtype relux_cur_max, Dtype rate) {
+  CUDA_KERNEL_LOOP(index, n) 
+  {
+    if (in[index] < 0) {
+      out[index] = in[index] * negative_slope; // (a*x, x|cur_max, relux_cur_max+ det*ret)
+    } 
+	else if (in[index] < relux_cur_max) 
+	{
+      out[index] = in[index];
+    } 
+	else 
+	{
+      out[index] = relux_cur_max + (in[index] - relux_cur_max) * rate;// 一次调整斜率 收缩
+    }
+  }
+}
+
+template <typename Dtype>
+__global__ void ReLUYRForward(const int n, const Dtype* in, Dtype* out,
+    Dtype negative_slope, Dtype relux_cur_max, Dtype relux_last_max, Dtype rate) {
+  CUDA_KERNEL_LOOP(index, n) {
+    if (in[index] < 0) 
+	{
+      out[index] = in[index] * negative_slope;
+    } 
+	else if (in[index] < relux_cur_max) 
+	{
+      out[index] = in[index];
+    } 
+	else if (in[index] < relux_last_max) 
+	{
+      out[index] = relux_cur_max + (in[index] - relux_cur_max) * rate;//  一次调整斜率 收缩
+    } 
+	else 
+	{
+      out[index] = relux_cur_max + (relux_last_max - relux_cur_max) * rate;// 二次调整斜率 收缩
+    }
+  }
+}
+/////// 反向传播   倒数===================================
+
+template <typename Dtype>
+__global__ void ReLUBackward(const int n, const Dtype* in_diff,
+    const Dtype* in_data, Dtype* out_diff, Dtype negative_slope) {
+  CUDA_KERNEL_LOOP(index, n) 
+  {//   (a*diff, diff)  正常无上截断====
+    out_diff[index] = in_diff[index] * ((in_data[index] > 0)
+        + (in_data[index] <= 0) * negative_slope);
+  }
+}
+
+template <typename Dtype>
+__global__ void ReLUXBackward(const int n, const Dtype* in_diff,
+    const Dtype* in_data, Dtype* out_diff, Dtype negative_slope, Dtype relux_cur_max) 
+	{
+  CUDA_KERNEL_LOOP(index, n) 
+  {// 有上截断 (a*diff, diff, 0)
+    out_diff[index] = in_diff[index] * (((in_data[index] > 0) && (in_data[index] <= relux_cur_max))
+        + (in_data[index] <= 0) * negative_slope);
+  }
+}
+
+template <typename Dtype>
+__global__ void ReLUXRBackward(const int n, const Dtype* in_diff,
+    const Dtype* in_data, Dtype* out_diff, Dtype negative_slope, Dtype relux_cur_max, float rate) 
+	{
+  CUDA_KERNEL_LOOP(index, n) 
+  {// 一次斜率收缩======== (a*diff, diff, rate)
+    if (in_data[index] > relux_cur_max) {
+      out_diff[index] = in_diff[index] * rate;
+    } 
+	else {
+      out_diff[index] = in_diff[index] * ((in_data[index] > 0)
+          + (in_data[index] <= 0) * negative_slope);
+    }
+  }
+}
+
+template <typename Dtype>
+__global__ void ReLUYRBackward(const int n, const Dtype* in_diff,
+    const Dtype* in_data, Dtype* out_diff, Dtype negative_slope, Dtype relux_cur_max, Dtype relux_last_max, float rate) 
+	{
+  CUDA_KERNEL_LOOP(index, n) 
+  {// 二次斜率调整
+    if (in_data[index] > relux_last_max) 
+	{
+      out_diff[index] = 0;// 这里有点问题？？
+    } 
+	else if (in_data[index] > relux_cur_max) 
+	{
+      out_diff[index] = in_diff[index] * rate;
+    } 
+	else 
+	{
+      out_diff[index] = in_diff[index] * ((in_data[index] > 0)
+          + (in_data[index] <= 0) * negative_slope);
+    }
+  }
+}
+```
+      
 
 ### 2.3.2 Sigmoid    负指数导数激活
       标准   f(x) = 1/(1+exp(-x))  x = 0, f(x) = y = 0.5

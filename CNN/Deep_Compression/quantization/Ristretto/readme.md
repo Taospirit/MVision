@@ -19,6 +19,9 @@
 
 [代码 主要修改](https://github.com/MichalBusta/caffe/commit/55c64c202fc8fca875e108b48c13993b7fdd0f63)
 
+
+[ristretto_ssd 代码 ](https://github.com/Ewenwan/ristretto_ssd)
+
 # Ristretto速览
 ## Ristretto Tool  Ristretto工具：
            Ristretto工具使用不同的比特宽度进行数字表示，
@@ -281,6 +284,9 @@ for(m =0; m<M; m++)               // 每个卷积核
      小数部分最后两位，所以整体需要除以2^(2)
      则表示的数为: R = (-1)^0 * 109 * 2^(-2) = 27.25
      
+     浮点数 ff  得到量化的数：
+      放大/缩小： sff = ff  * 2^(fl) 
+      取整：      round(sff) 
      
 ## 2、 动态定点法（Dynamic Fixed Point Approximation）
     CNN的不同部分具有显着的动态范围，
@@ -532,5 +538,637 @@ WEIGHTS="../../models/SqueezeNet/squeezenet_v1.0.caffemodel"              # 原�
 ```
 
 
+# 具体量化代码   base_ristretto.cpp
+```cpp
+// 具体量化方式
+
+#include <math.h>
+#include <algorithm>
+#include <stdlib.h>
+#include <time.h>
+
+#include "ristretto/base_ristretto_layer.hpp"
+
+namespace caffe {
+
+template <typename Dtype>
+BaseRistrettoLayer<Dtype>::BaseRistrettoLayer() {
+  // Initialize random number generator
+  srand(time(NULL));// 随机数种子=================
+}
+
+// 量化卷积参数==========================
+// f(n) = relu(w*a + b )
+template <typename Dtype>
+void BaseRistrettoLayer<Dtype>::QuantizeWeights_cpu(
+      vector<shared_ptr<Blob<Dtype> > > weights_quantized,// [w b]
+	  const int rounding,
+      const bool bias_term) 
+{
+// 量化的卷积层参数  w
+  Dtype* weight = weights_quantized[0]->mutable_cpu_data();
+// count() 总数
+  const int cnt_weight = weights_quantized[0]->count();
+  
+// 量化的卷积层参数  b
+  Dtype* bias = weights_quantized[1]->mutable_cpu_data();
+// count() 总数
+  const int cnt_bias = weights_quantized[1]->count();
+  
+  
+  switch (precision_) // 不同量化策略
+  {
+// 迷你浮点=======
+  case QuantizationParameter_Precision_MINIFLOAT:
+    Trim2MiniFloat_cpu(weight, cnt_weight, fp_mant_, fp_exp_, rounding);
+    if (bias_term) 
+    {
+      Trim2MiniFloat_cpu(bias, cnt_bias, fp_mant_, fp_exp_, rounding);
+    }
+    break;
+// 动态固定点========
+  case QuantizationParameter_Precision_DYNAMIC_FIXED_POINT:
+    Trim2FixedPoint_cpu(weight, cnt_weight, bw_params_, rounding, fl_params_);
+    if (bias_term)// 量化偏置 b       w*a + b 
+    {//                   起始指针  数量   总位宽     取整策略    小数位宽
+      Trim2FixedPoint_cpu(bias, cnt_bias, bw_params_, rounding, fl_params_);
+    }
+    break;
+// 2幂次===========
+  case QuantizationParameter_Precision_INTEGER_POWER_OF_2_WEIGHTS:
+    Trim2IntegerPowerOf2_cpu(weight, cnt_weight, pow_2_min_exp_, pow_2_max_exp_,
+        rounding);
+    // Don't trim bias
+    break;
+  default:
+    LOG(FATAL) << "Unknown trimming mode: " << precision_;
+    break;
+  }
+}
+
+// 量化层输入=============================
+template <typename Dtype>
+void BaseRistrettoLayer<Dtype>::QuantizeLayerInputs_cpu(
+      Dtype* data,
+      const int count) 
+{
+  switch (precision_) 
+  {
+	  
+// 2幂次===========
+    case QuantizationParameter_Precision_INTEGER_POWER_OF_2_WEIGHTS:
+      break;
+	  
+// 动态固定点======== 
+    case QuantizationParameter_Precision_DYNAMIC_FIXED_POINT:
+	 //                   起始指针  数量   总位宽     取整策略    小数位宽
+      Trim2FixedPoint_cpu(data, count, bw_layer_in_, rounding_, fl_layer_in_);
+      break;
+	  
+// 迷你浮点======= 
+    case QuantizationParameter_Precision_MINIFLOAT:
+      Trim2MiniFloat_cpu(data, count, fp_mant_, fp_exp_, rounding_);
+      break;
+	  
+    default:
+      LOG(FATAL) << "Unknown trimming mode: " << precision_;
+      break;
+  }
+}
 
 
+// 量化层输出================================
+template <typename Dtype>
+void BaseRistrettoLayer<Dtype>::QuantizeLayerOutputs_cpu(
+      Dtype* data, 
+     const int count) 
+{
+  switch (precision_)
+  {
+// 2幂次=========== 
+    case QuantizationParameter_Precision_INTEGER_POWER_OF_2_WEIGHTS:
+      break;
+     
+// 动态固定点========  
+    case QuantizationParameter_Precision_DYNAMIC_FIXED_POINT:
+    //                   起始指针  数量   总位宽     取整策略    小数位宽
+      Trim2FixedPoint_cpu(data, count, bw_layer_out_, rounding_, fl_layer_out_);
+      break;
+     
+// 迷你浮点======= 
+    case QuantizationParameter_Precision_MINIFLOAT:
+      Trim2MiniFloat_cpu(data, count, fp_mant_, fp_exp_, rounding_);
+      break;
+    default:
+      LOG(FATAL) << "Unknown trimming mode: " << precision_;
+      break;
+  }
+}
+
+
+// 动态固定点方式量化数据============================  
+template <typename Dtype>
+void BaseRistrettoLayer<Dtype>::Trim2FixedPoint_cpu(
+      Dtype* data,          // 数据 起始指针
+      const int cnt,        // 数量
+      const int bit_width,  // 量化总位宽
+      const int rounding,   // 取整策略
+      int fl)               // 小数位位宽
+{
+  for (int index = 0; index < cnt; ++index) 
+  {
+    // Saturate data 饱和数处理
+// 例如 0 1 1 0 1 1 0 1 , bit_width= 8, fl = 2
+// 最高位符号位，所以余下的数为 1 1 0 1 1 0 1 = 109D (假设全部作为整数位)
+// 实际小时位有2位，所以小数点需要向前移动 2位
+// 所以实际表示的数为 2^0 * 109 * 2(-2) = 27.25
+// 所以 总位宽 bit_width 小数位长度 fl
+// 表示的最大数为  (2^(bit_width-1) - 1)/(2^fl) = (2^(bit_width - 1) - 1)*(2^(-fl))
+// 最小的数为 -1 * (2^(bit_width - 1) - 1)*(2^(-fl))
+    Dtype max_data = (pow(2, bit_width - 1) - 1) * pow(2, -fl);// 最大数
+    Dtype min_data = -pow(2, bit_width - 1) * pow(2, -fl);// 最小数
+    
+    // 首先数据包和处理，比最大值小，比最小值大
+    data[index] = std::max(std::min(data[index], max_data), min_data);
+ 
+    // Round data
+	 data[index] *= pow(2, fl);// 按小数位乘方系数 放大或者缩小 
+    //data[index] /= pow(2, -fl);//   27.25125 * 2^2----> 109.005
+    // 放大后再取整================== 109.005 ----> 109/110
+    switch (rounding) 
+	{
+     // 最近偶数（NEAREST）
+    case QuantizationParameter_Rounding_NEAREST:
+      data[index] = round(data[index]);
+      break;
+    
+    // 随机舍入（STOCHASTIC） 
+    case QuantizationParameter_Rounding_STOCHASTIC:
+      data[index] = floor(data[index] + RandUniform_cpu());
+      break;
+    default:
+      break;
+    }
+	// 取整后再缩小 109/110 ----> 109  / 2^2  =  27.25
+    //data[index] *= pow(2, -fl);
+    data[index] /= pow(2, fl);// 相当于去除了超过小数位的部分============
+  }
+}
+
+/* 部分调整 借鉴inq，逐步量化，先从最大的部分开始量化
+// float quant_percent = 0.3; // 需要在前面 定义
+////////////////////  固定点量化
+template <typename Dtype>
+void BaseRistrettoLayer<Dtype>::Trim2FixedPoint_cpu(
+Dtype* data, const int cnt,
+const int bit_width, 
+const int rounding, 
+int fl) 
+
+ {
+	// 上下限计算
+    Dtype max_data = (pow(2, bit_width - 1) - 1) * pow(2, -fl);
+    Dtype min_data = -pow(2, bit_width - 1) * pow(2, -fl);
+    
+	// 获取 有序 数列
+    Dtype* data_copy=(Dtype*) malloc(cnt*sizeof(Dtype));
+    caffe_copy(cnt,data,data_copy);
+    caffe_abs(cnt,data_copy,data_copy);
+    std::sort(data_copy,data_copy+cnt); //data_copy order from small to large
+	
+   int partition=int(cnt*(1-quant_percent))-1;
+ 
+    for (int index = 0; index < cnt; ++index) 
+    {
+	   if(std::abs(data[index]) >= data_copy[partition])
+	    {
+			// Saturate data
+			data[index] = std::max(std::min(data[index], max_data), min_data);
+			// Round data
+			data[index] /= pow(2, -fl);
+			switch (rounding) 
+			{
+			case QuantizationParameter_Rounding_NEAREST:
+			  data[index] = round(data[index]);
+			  break;
+			case QuantizationParameter_Rounding_STOCHASTIC:
+			  data[index] = floor(data[index] + RandUniform_cpu());
+			  break;
+			default:
+			  break;
+			}
+			data[index] *= pow(2, -fl);
+		// mask_vec[i]=0;  // 标记量化标志
+	    }
+    }
+   free(data_copy);// 释放空间
+}
+*/
+
+
+
+
+// 迷你浮点量化======================================
+typedef union {
+  float d;
+  struct {
+    unsigned int mantisa : 23; // 尾数位
+    unsigned int exponent : 8; // 指数位
+    unsigned int sign : 1;     // 符号位
+  } parts;
+} float_cast;
+
+template <typename Dtype>
+void BaseRistrettoLayer<Dtype>::Trim2MiniFloat_cpu(Dtype* data, const int cnt,
+      const int bw_mant, const int bw_exp, const int rounding) {
+  for (int index = 0; index < cnt; ++index) {
+    int bias_out = pow(2, bw_exp - 1) - 1;
+    float_cast d2;
+    // This casts the input to single precision
+    d2.d = (float)data[index];
+    int exponent=d2.parts.exponent - 127 + bias_out;
+    double mantisa = d2.parts.mantisa;
+    // Special case: input is zero or denormalized number
+    if (d2.parts.exponent == 0) 
+	{
+      data[index] = 0;
+      return;
+    }
+    // Special case: denormalized number as output
+    if (exponent < 0) 
+	{
+      data[index] = 0;
+      return;
+    }
+    // Saturation: input float is larger than maximum output float
+    int max_exp = pow(2, bw_exp) - 1;
+    int max_mant = pow(2, bw_mant) - 1;
+    if (exponent > max_exp) 
+	{
+      exponent = max_exp;
+      mantisa = max_mant;
+    }
+	else 
+	{
+      // Convert mantissa from long format to short one. Cut off LSBs.
+      double tmp = mantisa / pow(2, 23 - bw_mant);
+      switch (rounding) 
+	  {
+      case QuantizationParameter_Rounding_NEAREST:
+        mantisa = round(tmp);
+        break;
+      case QuantizationParameter_Rounding_STOCHASTIC:
+        mantisa = floor(tmp + RandUniform_cpu());
+        break;
+      default:
+        break;
+      }
+    }
+    // Assemble result
+    data[index] = pow(-1, d2.parts.sign) * ((mantisa + pow(2, bw_mant)) /
+        pow(2, bw_mant)) * pow(2, exponent - bias_out);
+  }
+}
+
+// 2幂次=========== 
+template <typename Dtype>
+void BaseRistrettoLayer<Dtype>::Trim2IntegerPowerOf2_cpu(Dtype* data,
+      const int cnt, const int min_exp, const int max_exp, const int rounding) {
+	for (int index = 0; index < cnt; ++index) {
+    float exponent = log2f((float)fabs(data[index]));
+    int sign = data[index] >= 0 ? 1 : -1;
+    switch (rounding) {
+    case QuantizationParameter_Rounding_NEAREST:
+      exponent = round(exponent);
+      break;
+    case QuantizationParameter_Rounding_STOCHASTIC:
+      exponent = floorf(exponent + RandUniform_cpu());
+      break;
+    default:
+      break;
+    }
+    exponent = std::max(std::min(exponent, (float)max_exp), (float)min_exp);
+    data[index] = sign * pow(2, exponent);
+	}
+}
+
+// 返回0~1之间的一个小数=====================
+template <typename Dtype>
+double BaseRistrettoLayer<Dtype>::RandUniform_cpu(){
+  return rand() / (RAND_MAX+1.0);
+}
+
+template BaseRistrettoLayer<double>::BaseRistrettoLayer();
+template BaseRistrettoLayer<float>::BaseRistrettoLayer();
+template void BaseRistrettoLayer<double>::QuantizeWeights_cpu(
+    vector<shared_ptr<Blob<double> > > weights_quantized, const int rounding,
+    const bool bias_term);
+template void BaseRistrettoLayer<float>::QuantizeWeights_cpu(
+    vector<shared_ptr<Blob<float> > > weights_quantized, const int rounding,
+    const bool bias_term);
+template void BaseRistrettoLayer<double>::QuantizeLayerInputs_cpu(double* data,
+    const int count);
+template void BaseRistrettoLayer<float>::QuantizeLayerInputs_cpu(float* data,
+    const int count);
+template void BaseRistrettoLayer<double>::QuantizeLayerOutputs_cpu(double* data,
+    const int count);
+template void BaseRistrettoLayer<float>::QuantizeLayerOutputs_cpu(float* data,
+    const int count);
+template void BaseRistrettoLayer<double>::Trim2FixedPoint_cpu(double* data,
+    const int cnt, const int bit_width, const int rounding, int fl);
+template void BaseRistrettoLayer<float>::Trim2FixedPoint_cpu(float* data,
+    const int cnt, const int bit_width, const int rounding, int fl);
+template void BaseRistrettoLayer<double>::Trim2MiniFloat_cpu(double* data,
+    const int cnt, const int bw_mant, const int bw_exp, const int rounding);
+template void BaseRistrettoLayer<float>::Trim2MiniFloat_cpu(float* data,
+    const int cnt, const int bw_mant, const int bw_exp, const int rounding);
+template void BaseRistrettoLayer<double>::Trim2IntegerPowerOf2_cpu(double* data,
+    const int cnt, const int min_exp, const int max_exp, const int rounding);
+template void BaseRistrettoLayer<float>::Trim2IntegerPowerOf2_cpu(float* data,
+    const int cnt, const int min_exp, const int max_exp, const int rounding);
+template double BaseRistrettoLayer<double>::RandUniform_cpu();
+template double BaseRistrettoLayer<float>::RandUniform_cpu();
+
+}  // namespace caffe
+
+```
+# net.cpp 中统计 各层 数据范围
+```c
+// 绝对最大值
+template <typename Dtype>
+Dtype Net<Dtype>::findMax(Blob<Dtype>* blob) {
+  const Dtype* data = blob->cpu_data();
+  int cnt = blob->count();
+  Dtype max_val = (Dtype)-10;
+  for (int i = 0; i < cnt; ++i) {
+    max_val = std::max(max_val, (Dtype)fabs(data[i]));
+  }
+  return max_val;
+}
+// 最小值==================================
+template <typename Dtype>
+Dtype Net<Dtype>::findMin(Blob<Dtype>* blob) {
+  const Dtype* data = blob->cpu_data();
+  int cnt = blob->count();
+  Dtype min_val = (Dtype)+10;// 初始化+10
+  for (int i = 0; i < cnt; ++i)
+  {
+    // min=====
+    min_val = std::min(min_val, (Dtype)(data[i]));
+  }
+  return min_val;
+}
+
+// 最大值===================================
+template <typename Dtype>
+Dtype Net<Dtype>::findMaxNoAbs(Blob<Dtype>* blob) {
+  const Dtype* data = blob->cpu_data();
+  int cnt = blob->count();
+  Dtype max_val = (Dtype)-10;// 初始化 -10
+  for (int i = 0; i < cnt; ++i) 
+  {
+    //max======= 
+    max_val = std::max(max_val, (Dtype)(data[i]));
+  }
+  return max_val;
+}
+
+// 排序 选择数量 百分比处的值
+template <typename Dtype>
+Dtype Net<Dtype>::findMax_percent(Blob<Dtype>* blob, float percent) 
+{
+  const Dtype* data = blob->cpu_data();
+  int cnt = blob->count();
+  
+  Dtype* data_copy_sort = (Dtype*) malloc(cnt*sizeof(Dtype));
+  
+  caffe_copy(cnt, data,data_copy_sort);         // 复制原始数据
+  caffe_abs(cnt, data_copy_sort,data_copy_sort);// 绝对值
+  
+  // 对权重进行排序，获取权重的有序序列 升序排列
+  std::sort(data_copy_sort,data_copy_sort + cnt); 
+  
+  // 计算分组间隔点
+  int partition=int(cnt*(1.0-percent))-1;// 量化最后面的30%(值大的部分)
+  
+  Dtype max_val = data_copy_sort[partition];// 指定百分比处的值
+  
+  free(data_copy_sort);
+  
+  return max_val;
+}
+
+template <typename Dtype>
+void Net<Dtype>::RangeInLayers(vector<string>* layer_name,
+      vector<Dtype>* max_in, vector<Dtype>* max_out, vector<Dtype>* max_param) {
+  // Initialize vector elements, if needed.
+  if(layer_name->size()==0) {
+    for (int layer_id = 0; layer_id < layers_.size(); ++layer_id) {
+      if (strcmp(layers_[layer_id]->type(), "Convolution") == 0 ||
+          strcmp(layers_[layer_id]->type(), "InnerProduct") == 0) {
+        layer_name->push_back(this->layer_names()[layer_id]);
+        max_in->push_back(0);// 首次统计
+        max_out->push_back(0);
+        max_param->push_back(0);
+      }
+    }
+  }
+  // Find maximal values.
+  int index = 0;
+  Dtype max_val;
+  for (int layer_id = 0; layer_id < layers_.size(); ++layer_id) {
+    if (strcmp(layers_[layer_id]->type(), "Convolution") == 0 ||
+          strcmp(layers_[layer_id]->type(), "InnerProduct") == 0) {
+			  
+      max_val = findMax(bottom_vecs_[layer_id][0]);
+	  //max_val = findMax_percent(bottom_vecs_[layer_id][0], 0.00);// 输入激活值 1%处的以外的值 直接 clip
+      max_in->at(index) = std::max(max_in->at(index), max_val);
+	  
+      max_val = findMax(top_vecs_[layer_id][0]);
+	  //max_val = findMax_percent(top_vecs_[layer_id][0], 0.00);// 输入激活值  1%处的以外的值 直接 clip
+      max_out->at(index) = std::max(max_out->at(index), max_val);
+      // Consider the weights only, ignore the bias
+	  
+      max_val = findMax(&(*layers_[layer_id]->blobs()[0]));
+	  //max_val = findMax_percent(&(*layers_[layer_id]->blobs()[0]), 0);// 参数权重 w 可以选择最大值
+      max_param->at(index) = std::max(max_param->at(index), max_val);
+      index++;
+    }
+  }
+}
+
+```
+## 量纲计算 
+```c
+// 计算最大值整数位需要的量纲长度 
+  for (int i = 0; i < layer_names_.size(); ++i) {
+    il_in_.push_back((int)ceil(log2(max_in_[i])));
+    il_out_.push_back((int)ceil(log2(max_out_[i])));
+    il_params_.push_back((int)ceil(log2(max_params_[i])+1));
+  }
+  // Debug
+  for (int k = 0; k < layer_names_.size(); ++k) {
+    LOG(INFO) << "Layer " << layer_names_[k] <<
+        ", integer length input=" << il_in_[k] <<
+        ", integer length output=" << il_out_[k] <<
+        ", integer length parameters=" << il_params_[k];
+  }
+  
+  // 总量纲长度 bw_conv  减去整数位量纲长度 得到 小数位量纲长度
+        param_layer->set_type("ConvolutionRistretto");
+        param_layer->mutable_quantization_param()->set_fl_params(bw_conv -
+            GetIntegerLengthParams(param->layer(i).name()));
+        param_layer->mutable_quantization_param()->set_bw_params(bw_conv);
+	
+        param_layer->mutable_quantization_param()->set_fl_layer_in(bw_in -
+            GetIntegerLengthIn(param->layer(i).name()));
+        param_layer->mutable_quantization_param()->set_bw_layer_in(bw_in);
+	
+        param_layer->mutable_quantization_param()->set_fl_layer_out(bw_out -
+            GetIntegerLengthOut(param->layer(i).name()));
+        param_layer->mutable_quantization_param()->set_bw_layer_out(bw_out);
+
+```
+# 统计每一层 的 每个卷积核的参数范围
+```c
+template <typename Dtype>
+vector<Dtype> Net<Dtype>::FindMax(Blob<Dtype>* blob, bool is_single) {
+  const Dtype* data = blob->cpu_data(); // 当前层 数据起始指针
+  int cnt = blob->count();              // 当前层 数据数量
+  vector<Dtype> max_vals;               // 当前层每个卷积核（通道的最大值）
+  Dtype max_val = (Dtype)(-10);         // 初始化 最大值
+
+  int index = 0;
+  // 4维 卷积核==================================================================
+  if(blob->shape().size() == 4) // output_channel * input_channel * kernel_height * kernel_width
+  {
+    // 值记录当前层 中所有卷积核 参数中的最大值==============
+    if(is_single) 
+    {
+      max_vals = vector<Dtype>(1, Dtype(-10));
+      for (int i = 0; i < cnt; ++i) // 遍历
+      {
+        max_val = std::max(max_val, (Dtype)fabs(data[i]));// 最大值
+      }
+      max_vals.at(0) = max_val;// 层最大值放在第一个位置
+    } 
+    
+    // 记录当前层中每一个 卷积核中的最大值==================
+    else 
+    { // 卷积核维度 ：output_channel * input_channel * kernel_height * kernel_width
+      int height  = blob->shape(2);  // 卷积核高度==
+      int width   = blob->shape(3);  // 卷积核宽度==
+      int channel = blob->shape(0);  // 卷积核数量 输出通道数==
+      int deep    = blob->shape(1);  // 卷积核深度(厚度) 相当于立方体体积==
+      max_vals = vector<Dtype>(channel, Dtype(-10));// 初始化每个卷积核的最大值
+      int step = deep * height * width;// 每个卷积核的参数数量 = 深度*宽*高
+      for (int i = 0; i < cnt; ++i) 
+      {// 总的排布顺序 是 按 每个卷积核进行循序 存放=====
+        if((i + 1) % step == 0) // 出现下一个卷积核的领域=====
+	{
+          max_vals.at(index) = std::max(max_val, (Dtype)fabs(data[i]));// 当前卷积核的最大值
+          ++index;// 迭代下一个卷积核
+        }
+	else
+	{
+          max_val = std::max(max_val, (Dtype)fabs(data[i]));// 记录当前区域中的最大值
+        }
+      }
+    }
+  }
+  
+  // blob 不是4维============= 输入输出================================
+// 处理 CHW 格式的数据
+  else 
+  {
+    if(is_single) // 真个输入输出参数中的最大值============
+    {
+      max_vals = vector<Dtype>(1, Dtype(-10));
+      for (int i = 0; i < cnt; ++i)
+      {
+        max_val = std::max(max_val, (Dtype)fabs(data[i]));//最大值====
+      }
+      max_vals.at(0) = max_val;// 宏观最大值，放在第一个地方
+    } 
+    
+    else // 求取每一个 输出通道中输入值的最大值=============
+    { // output_channel * input_channel 
+      int channel = blob->shape(0); // 总输出通道数量 === 本层卷积核的数量===本层输出通道数量==
+      max_vals = vector<Dtype>(channel, Dtype(-10));// 初始化每个通道的输入最大值
+      int step = blob->shape(1);// 每个通道的长度
+      for (int i = 0; i < cnt; ++i) 
+      {
+        if((i + 1) % step == 0) // 出现下一个通道
+	{
+          max_vals.at(index) = std::max(max_val, (Dtype)fabs(data[i]));
+          ++index; // 迭代 下一个通道
+        } 
+	else 
+	{
+          max_val = std::max(max_val, (Dtype)fabs(data[i]));// 本通道中领域元素中 的最大值
+        }
+      }
+    }
+  }
+  
+  return max_vals;
+}
+
+template <typename Dtype>
+void Net<Dtype>::RangeInLayers(vector<string>* layer_name,
+      vector<Dtype>* max_in, vector<Dtype>* max_out, vector<vector<Dtype>>* max_param, string scaling) {
+  // Initialize vector elements, if needed.
+  if(layer_name->size()==0) // 第一次循环需要初始化=======
+  {
+    for (int layer_id = 0; layer_id < layers_.size(); ++layer_id) // 遍历所有层======
+    {
+      if (strcmp(layers_[layer_id]->type(), "Convolution") == 0) // 是卷积层的，才进行统计====
+      {
+        layer_name->push_back(this->layer_names()[layer_id]);// 卷积层名字===
+        max_in->push_back(0);     // 层输入最大值===
+        max_out->push_back(0);    // 层输出最大值===
+        if (scaling == "single") 
+	{
+          max_param->push_back(vector<Dtype>(1, 0));// 本层卷积核 的最大值====
+        }
+        else {
+	// 卷积核维度 ：output_channel * input_channel * kernel_height * kernel_width
+          int param_shape = (&(*layers_[layer_id]->blobs()[0]))->shape(0);// 每一层的 卷积核数量：输出通道数
+          max_param->push_back(vector<Dtype>(param_shape, 0));// 每一层的每一个卷积核都需要统计最大值
+        }
+      }
+    }
+  }
+  
+  // Find maximal values.
+  int index = 0;
+  vector<Dtype> max_vals;// 最大值
+  for (int layer_id = 0; layer_id < layers_.size(); ++layer_id) // 遍历所有层======
+  {
+    if (strcmp(layers_[layer_id]->type(), "Convolution") == 0) // 是卷积层的，才进行统计====
+    {
+      max_vals = FindMax(bottom_vecs_[layer_id][0]);
+      max_in->at(index) = std::max(max_in->at(index), max_vals.at(0)); // 输入最大值===
+
+      max_vals = FindMax(top_vecs_[layer_id][0]);
+      max_out->at(index) = std::max(max_out->at(index), max_vals.at(0));// 输出最大值====
+
+      // Consider the weights only, ignore the bias
+      if (scaling == "single") // 每一层 卷积weight的最大值===
+      {
+        max_vals = FindMax(&(*layers_[layer_id]->blobs()[0]));
+        max_param->at(index).at(0) = std::max(max_param->at(index).at(0), max_vals.at(0));
+      } 
+      else 
+      {
+        max_vals = FindMax(&(*layers_[layer_id]->blobs()[0]), false);// 当前训练中，每层 每个卷积核的最大值
+        for(int i = 0; i < max_vals.size(); ++i)
+	  // 获取所有训练中每一卷积层index 的 每个 卷积核i 的最大值=======
+          max_param->at(index).at(i) = std::max(max_param->at(index).at(i), max_vals.at(i));
+      }
+      index++;// 卷积 层 id 
+    }
+  }
+}
+
+```

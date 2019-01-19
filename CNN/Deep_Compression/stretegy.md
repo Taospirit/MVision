@@ -183,7 +183,7 @@
 
 ### fastert-rcnn 检测框架
 #### vgg16-fastert-rcnn
-    Faster R-CNN 
+    Faster R-CNN coco数据集上
     baseline mAP@.5  mAP@.5:.95
     VGG-16     41.5  21.5
     ResNet-101 48.4  27.2
@@ -226,17 +226,77 @@
         vgg19：16个卷积层+3个全链接层=19
             http://www.robots.ox.ac.uk/~vgg/software/very_deep/caffe/VGG_ILSVRC_19_layers.caffemodel   548M
             https://github.com/Ewenwan/MVision/blob/master/CNN/SSD/VGG_ILSVRC_19_layers_deploy.prototxt
-    分类结果：两者多次度分类差不多
+    分类结果(错误率)：两者多次度分类差不多
         top-1：24.8
         top-5：7.5
 
 ###  ResNet模型
 
+    论文: 
+        https://arxiv.org/pdf/1512.03385.pdf
+    模型结构：最后一个 1000-d全连接层，其他均为卷积层，18/34 是两个3*3卷积，后面是 1*1 + 3*3 + 1*1
+    权重文件： https://onedrive.live.com/?authkey=%21AAFW2-FVoxeVRck&id=4006CBB8476FF777%2117887&cid=4006CBB8476FF777  需要翻墙
+              csdn上有下载 需要金币
+              https://download.csdn.net/download/shaxinqing/10426907  ResNet-152-model.caffemodel
+              https://download.csdn.net/download/zhs233/10311355      ResNet-101-model.caffemodel
+              https://download.csdn.net/download/zhs233/10311350      ResNet-50-model.caffemodel
+    prototxt文件：         
+        https://github.com/Ewenwan/MVision/blob/master/CNN/ResNet/ResNet-50-deploy.prototxt
+        https://github.com/Ewenwan/MVision/blob/master/CNN/ResNet/ResNet-101-deploy.prototxt
+        https://github.com/Ewenwan/MVision/blob/master/CNN/ResNet/ResNet-152-deploy.prototxt
+    分类结果(错误率)：    
+        ResNet18: 
+            top-1：27.88
+            top-5：-
+        ResNet34：
+            top-1：21.53
+            top-5：5.60   
+        ResNet50:
+            top-1：20.74
+            top-5：5.25
+        ResNet101:
+            top-1：19.87
+            top-5：4.60
+        ResNet152: 
+            top-1：19.38
+            top-5：4.49   / 3.57
+
 ###  mobilenet模型
 
+    MobileNets-v1:
+        论文：https://arxiv.org/pdf/1704.04861.pdf
+        分类准确率：
+        top-1：70.81
+        top-5：89.85 
+        模型大小： 16.2 MB
+        模型：https://github.com/shicai/MobileNet-Caffe/blob/master/mobilenet.caffemodel
+        框架：https://github.com/Ewenwan/MVision/blob/master/CNN/MobileNet/mobilenet_v1_deploy.prototxt
+    MobileNets-v2:
+        论文：https://arxiv.org/pdf/1801.04381.pdf
+        分类准确率：
+            top-1：71.90%
+            top-5：90.49%
+        模型大小：13.5 MB
+        模型：https://github.com/shicai/MobileNet-Caffe/blob/master/mobilenet_v2.caffemodel
+        框架：https://github.com/Ewenwan/MVision/blob/master/CNN/MobileNet/mobilenet_v2_deploy.prototxt
+
 ### squeezeet模型
+    论文：https://arxiv.org/pdf/1602.07360.pdf
+    分类准确率：
+        top-1：60.4%
+        top-5：82.5%
+    模型大小：4.8MB    
+    模型：https://github.com/DeepScale/SqueezeNet/blob/master/SqueezeNet_v1.1/squeezenet_v1.1.caffemodel
+    框架：https://github.com/Ewenwan/MVision/blob/master/CNN/SqueezeNet/squeezenet_v1.1_deploy.prototxt
 
 ### shufflenet模型
+    论文：https://arxiv.org/pdf/1707.01083.pdf
+    分类准确率：
+        top-1：65.45%
+        top-5：86.38%
+    模型大小：7.04MB    
+    模型：https://github.com/msnqqer/ShuffleNet/blob/master/shufflenet_1x_g3.caffemodel
+    框架：https://github.com/Ewenwan/MVision/blob/master/CNN/ShuffleNet/shufflenet_1x_g3_deploy.prototxt
 
 
 
@@ -270,9 +330,69 @@
       sudo tar xzf labels.tgz                        标签
       sudo unzip -q instances_train-val2014.zip     分割  得到 annotations  实例分割
 
-      生成训练/测试图像列表文件
-      paste <(awk "{print \"$PWD\"}" <5k.part) 5k.part | tr -d '\t' > 5k.txt   测试验证数据
+      生成训练/测试图像列表文件  darknet框架下格式
+      paste <(awk "{print \"$PWD\"}" <5k.part) 5k.part | tr -d '\t' > 5k.txt   测试验证数据
       paste <(awk "{print \"$PWD\"}" <trainvalno5k.part) trainvalno5k.part | tr -d '\t' > trainvalno5k.txt  训练数据
+    4.  caffe lmdb格式转换
+      2014年
+      train2014.zip 训练集图片
+      val2014.zip   验证集图片
+      instances_train-val2014.zip  总的json标签
+      labels.tgz    darknet下 的 txt标签
+      2017年 
+        http://images.cocodataset.org/zips/train2017.zip 训练集图片
+        http://images.cocodataset.org/zips/val2017.zip   验证集图片
+        http://images.cocodataset.org/annotations/annotations_trainval2017.zip 总的json标签
+
+        处理 ：
+        下载 coco数据库处理脚本 
+            git clone https://github.com/weiliu89/coco.git
+            cd coco
+            git checkout dev  # 必要 在 PythonAPI 或出现 scripts/ 文件夹 一些处理脚本
+        安装：
+            cd coco/PythonAPI
+            python setup.py build_ext --inplace
+            
+        将总的json文件拆分成 各个图像的json
+            python scripts/batch_split_annotation.py 
+            
+        获取 图片id 对应的图片尺寸大小 长宽
+            python scripts/batch_get_image_size.py
+            
+        创建图片地址+标签地址的 列表文件    
+            python data/coco/create_list.py
+        生成lmdb 文件 and make soft links at examples/coco/
+           ./create_data.sh
+            
+            
+### vgg16-ssd 检测
+    论文：https://arxiv.org/pdf/1512.02325.pdf
+    检测准确度：
+        SSD300：voc2007 map0.5: 77.2; coco上 map0.5: 43.1, map0.7: 25.8;
+        SSD512: voc2007 map0.5: 79.8; coco上 map0.5: 48.5, map0.7: 30.3;
+        
+      YOLO-V2下的准确度
+        SSD300：voc2007 map0.5: 74.3; coco上 map0.5: 41.2
+        SSD500：voc2007 map0.5: 76.8; coco上 map0.5: 46.5
+        
+    模型：
+        https://github.com/weiliu89/caffe/tree/ssd  有链接，需要翻墙，其他资源未找到。
+        SSD300_VOC0712 
+        SSD512_VOC0712 
+        SSD300_COCO 
+        SSD512_COCO 
+    框架文件：
+        COCO https://github.com/Ewenwan/MVision/blob/master/CNN/SSD/coco_vgg16-ssd-300-300/VGG_coco_SSD_300x300_deploy.prototxt
+        VOC0712 https://github.com/Ewenwan/MVision/blob/master/CNN/SSD/SSD_300x300/ssd_33_deploy.prototxt
+### yolo-v2 检测
+    论文：https://arxiv.org/pdf/1612.08242.pdf
+      YOLO-V2 的准确度(darknet下)
+        YOLOv2：voc2007 map0.5: 76.8; 
+        YOLOv2 544x544：voc2007 map0.5: 78.6; 
+        YOLOv2 608x608:coco上 map0.5: 48.1
+        
+      caffe下 
+     448*448尺寸caffeinemodel  https://pan.baidu.com/s/1c71EB-6A1xQb2ImOISZiHA password: 9u5v
       
-
-
+#### 裁剪
+#### 量化

@@ -2,6 +2,169 @@
 
 ![](http://file.elecfans.com/web1/M00/55/79/pIYBAFssV_SAPOcSAACWBTome1c039.png)
 
+[其他博客参考](https://github.com/ICEORY/iceory.gitbook.io/tree/master/Network%20Quantization)
+
+[论文合集](https://github.com/Ewenwan/MVision/blob/master/CNN/Deep_Compression/quantization/quantizedNN_paper.md)
+
+[低数值精度深度学习推理与训练](https://software.intel.com/zh-cn/articles/lower-numerical-precision-deep-learning-inference-and-training)
+
+
+
+# 具体量化方法
+[参考](https://github.com/Ewenwan/pytorch-playground/blob/master/utee/quant.py)
+
+
+
+```python
+# 线性量化
+def linear_quantize(input, sf, bits):
+    assert bits >= 1, bits
+    # 一位
+    if bits == 1:
+        return torch.sign(input) - 1
+    
+    delta = math.pow(2.0, -sf)# 小数位 位宽 量化精度
+    bound = math.pow(2.0, bits-1)
+    min_val = - bound    # 上限制值
+    max_val = bound - 1  # 下限值
+    rounded = torch.floor(input / delta + 0.5)# 扩大后取整
+
+    clipped_value = torch.clamp(rounded, min_val, max_val) * delta# 再缩回
+    return clipped_value
+# 对数线性量化
+def log_linear_quantize(input, sf, bits):
+    assert bits >= 1, bits
+    if bits == 1:
+        return torch.sign(input), 0.0, 0.0
+
+    s = torch.sign(input)# 正负号
+    input0 = torch.log(torch.abs(input) + 1e-20)# 求对数 获取 比特位
+    v = linear_quantize(input0, sf, bits)# 对比特位进行线性量化
+    v = torch.exp(v) * s# 再指数 回 原数
+    return v
+# 双曲正切量化
+def tanh_quantize(input, bits):
+    assert bits >= 1, bits
+    if bits == 1:
+        return torch.sign(input)
+	
+    input = torch.tanh(input) # 双曲正切 映射 [-1, 1]
+    input_rescale = (input + 1.0) / 2 #  再 映射到 [0, 1]
+    n = math.pow(2.0, bits) - 1       # 固定比特位 放大系数
+    v = torch.floor(input_rescale * n + 0.5) / n # 放大后取整
+    v = 2 * v - 1 # [-1, 1]                      # 再放回原来的范围
+
+    v = 0.5 * torch.log((1 + v) / (1 - v))       # 反双曲正切 回原数 arctanh
+    return v
+```
+
+
+# NN的INT8计算
+
+## 概述
+
+	NN的INT8计算是近来NN计算优化的方向之一。
+	相比于传统的浮点计算，整数计算无疑速度更快，
+	而NN由于自身特性，对单点计算的精确度要求不高，
+	且损失的精度还可以通过retrain的方式恢复大部分，
+	因此通常的科学计算的硬件（没错就是指的GPU）并不太适合NN运算，尤其是NN Inference。
+
+>传统的GPU并不适合NN运算，因此Nvidia也好，还是其他GPU厂商也好，通常都在GPU中又集成了NN加速的硬件，因此虽然商品名还是叫做GPU，但是工作原理已经有别于传统的GPU了。
+
+这方面的文章以Xilinx的白皮书较为经典：
+
+https://china.xilinx.com/support/documentation/white_papers/c_wp486-deep-learning-int8.pdf
+
+利用Xilinx器件的INT8优化开展深度学习
+
+## INT量化
+
+论文：
+
+《On the efficient representation and execution of deep acoustic models》
+
+![](https://github.com/Ewenwan/antkillerfarm.github.com/tree/master/images/img2/INT8.png)
+
+一个浮点数包括底数和指数两部分。将两者分开，就得到了一般的INT量化。
+
+## UINT量化
+
+论文：
+
+《Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference》
+
+![](https://github.com/Ewenwan/antkillerfarm.github.com/tree/master/images/img2/INT8_2.png)
+
+UINT量化使用bias将数据搬移到正数区间。
+
+这篇论文的另一个贡献在于：原先的INT8量化是针对已经训练好的模型。而现在还可以在训练的时候就进行量化——前向计算进行量化，而反向的误差修正不做量化。
+
+## NN硬件的指标术语
+
+MACC：multiply-accumulate，乘法累加。
+
+FLOPS：Floating-point Operations Per Second，每秒所执行的浮点运算次数。
+
+显然NN的INT8计算主要以MACC为单位。
+
+## 低精度数据计算库 gemmlowp
+
+gemmlowp是Google提出的一个支持低精度数据的GEMM（General Matrix Multiply）库。
+
+代码：
+
+https://github.com/google/gemmlowp
+
+## 论文
+
+《Quantizing deep convolutional networks for efficient inference: A whitepaper》
+
+## 参考
+
+https://www.chiphell.com/thread-1620755-1-1.html
+
+新Titan X的INT8计算到底是什么鬼
+
+https://mp.weixin.qq.com/s/S9VcoS_59nbZWe_P3ye2Tw
+
+减少模型半数内存用量：百度&英伟达提出混合精度训练法
+
+https://zhuanlan.zhihu.com/p/35700882
+
+CNN量化技术
+
+https://mp.weixin.qq.com/s/9DXMqiPIK5P5wzUMT7_Vfw
+
+基于交替方向法的循环神经网络多比特量化
+
+https://mp.weixin.qq.com/s/PDeChj1hQqUrZiepxXODJg
+
+ICLR oral：清华提出离散化架构WAGE，神经网络训练推理合二为一
+
+http://blog.csdn.net/tangwei2014/article/details/55077172
+
+二值化神经网络介绍
+
+https://mp.weixin.qq.com/s/oumf8l28ijYLxc9fge0FMQ
+
+嵌入式深度学习之神经网络二值化（1）
+
+https://mp.weixin.qq.com/s/tbRj5Wd69n9gvSzW4oKStg
+
+嵌入式深度学习之神经网络二值化（2）
+
+https://mp.weixin.qq.com/s/RsZCTqCKwpnjATUFC8da7g
+
+嵌入式深度学习之神经网络二值化（3）
+
+https://mp.weixin.qq.com/s/tbRj5Wd69n9gvSzW4oKStg
+
+异或神经网络
+
+https://mp.weixin.qq.com/s/KgM1k1bziLTCec67hQ8hlQ
+
+超全总结：神经网络加速之量化模型
+
 
 # 量化(quantization)。
     对象：对权重量化，对特征图量化(神经元输出)，对梯度量化(训练过程中)
@@ -152,7 +315,7 @@
         2. 运算量减少， 原先浮点数的乘法运算，可以变成 二进制位的异或运算。
         
 
-## 1. BNN全二值网络
+## 2.1. BNN全二值网络
 
     BNN的 激活函数值 和 权重参数 都被二值化了, 前向传播是使用二值，反向传播时使用全精度梯度。 
     
@@ -272,7 +435,7 @@
 ![](https://img-blog.csdn.net/20170214010005900?watermark/2/text/aHR0cDovL2Jsb2cuY3Nkbi5uZXQvdGFuZ3dlaTIwMTQ=/font/5a6L5L2T/fontsize/400/fill/I0JBQkFCMA==/dissolve/70/gravity/SouthEast)
     
     
-## 2. BCN 混有单精度与二值的神经网络BinaryConnect 与BNN合并**
+## 2.2. BCN 混有单精度与二值的神经网络BinaryConnect 与BNN合并**
 
 [BinaryConnect: Training Deep Neural Networks with binary weights](https://arxiv.org/pdf/1511.00363.pdf)
 
@@ -303,7 +466,7 @@
     由于达成了中间结果的二值化，BinaryNet的一个样例实现无需额外硬件，
     在现有的GPU上即达成了7倍加速。
   
-## 3. 二值系数网络 BWN  异或网络XNOR-Net  
+## 2.3. 二值系数网络 BWN  异或网络XNOR-Net  
 [BWN(Binary-Weights-Networks) ](https://arxiv.org/pdf/1603.05279.pdf)
 
 ![](http://file.elecfans.com/web1/M00/55/79/pIYBAFssV_SAaYgnAACz9cXw6vE854.png)
@@ -423,7 +586,7 @@
 	
 
  
-## 4. QNN 量化网络 量化激活函数 nbit量化
+## 2.4. QNN 量化网络 量化激活函数 nbit量化
 [QNN Quantized Neural Networks ](https://arxiv.org/pdf/1609.07061.pdf)
 
         对BNN的简单扩展，
@@ -468,7 +631,7 @@
         其次，利用ILSVRC-12训练集对量化网络的全连接层进行微调，恢复分类精度。
         最后，纠错量化微调的层网络的全连接。
 
-## 5. 约束低比特(3比特)量化 Extremely Low Bit Neural Networks 
+## 2.5. 约束低比特(3比特)量化 Extremely Low Bit Neural Networks 
 
 [论文 Extremely Low Bit Neural Network: Squeeze the Last Bit Out with ADMM](https://arxiv.org/pdf/1707.09870.pdf)
 
@@ -557,7 +720,7 @@
     参数空间中加入2、4、8等值后，仍然不需要乘法运算，只需进行移位操作。
     因此，通过这种方法将神经网络中的乘法操作全部替换为移位和加操作。
      
-## 6. 哈希函数两比特缩放量化 BWNH 
+## 2.6. 哈希函数两比特缩放量化 BWNH 
 [论文](https://arxiv.org/pdf/1802.02733.pdf)
 
 [博客解析](https://blog.csdn.net/ajj15120321/article/details/80571748)
@@ -583,6 +746,24 @@
     
     为了减轻用哈希方法所带来的loss，
     本文将binary codes乘以了一个scaling factor并用交替优化的策略来更新binary codes以及factor.
+## 2.7 高阶残差量化网络 二值网络+量化残差二值网络 HORQ
+论文：Performance Guaranteed Network Acceleration via High-Order Residual Quantization
+
+[论文链接](https://arxiv.org/abs/1708.08687.pdf)
+
+
+	本文是对 XNOR-Networks 的改进，将CNN网络层的输入 进行高精度二值量化，
+	从而实现高精度的二值网络计算，XNOR-Networks 也是对每个CNN网络层的权值和输入进行二值化，
+	这样整个CNN计算都是二值化的，这样计算速度快，占内存小。
+	一般对输入做二值化后模型准确率会下降特别厉害，
+	而这篇文章提出的对权重和输入做high-order residual quantization的方法,
+	可以在保证准确率的情况下大大压缩和加速模型。
+	
+	XNOR-Networks 对输入进行一级量化
+	HORQ          对输入进行多级量化(对上级量化的残差再进行量化)
+	
+![](https://static.leiphone.com/uploads/new/article/740_740/201710/59e2f036c850f.png?imageMogr2/format/jpg/quality/90)
+	
 
 # 3. 三值化网络 
 
